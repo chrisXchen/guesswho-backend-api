@@ -3,9 +3,17 @@ import openai
 from typing import List
 
 from fastapi import FastAPI, Request
-from pydantic import BaseModel
+from pydantic import BaseModel, BaseSettings
 
 from fastapi.middleware.cors import CORSMiddleware
+
+
+class Settings(BaseSettings):
+    app_name: str = "Guesswho API"
+    OPENAI_API_KEY: str
+
+
+settings = Settings()
 
 origins = [
     "http://localhost.tiangolo.com",
@@ -16,7 +24,7 @@ origins = [
 
 # Use the OpenAI API to send prompts to a GPT-3 model
 # and receive responses
-openai.api_key = "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"
+openai.api_key = settings.OPENAI_API_KEY
 
 app = FastAPI()
 
