@@ -1,32 +1,30 @@
 import random
 import openai
+import json
 from typing import List
 
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, Request, HTTPException, Response
 from pydantic import BaseModel, BaseSettings
 
 from fastapi.middleware.cors import CORSMiddleware
+from starlette.middleware.sessions import SessionMiddleware
 
 
 class Settings(BaseSettings):
     app_name: str = "Guesswho API"
     OPENAI_API_KEY: str
+    SESSION_SECRET: str
 
 
 settings = Settings()
 
-origins = [
-    "http://localhost.tiangolo.com",
-    "https://localhost.tiangolo.com",
-    "http://localhost",
-    "http://localhost:8080",
-]
+app = FastAPI()
+
 
 # Use the OpenAI API to send prompts to a GPT-3 model
 # and receive responses
 openai.api_key = settings.OPENAI_API_KEY
 
-app = FastAPI()
 
 app.add_middleware(
     CORSMiddleware,
@@ -36,17 +34,11 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# List of 11 possible Harry Potter characters
-characters = ["Sansa Stark", "Brienne of Tarth", "Cersei Lannister",
-              "Arya Stark", "Olenna Tyrell", "Daenerys Targaryen",
-              "Theon Greyjoy", "Littlefinger", "Tyrion Lannister",
-              "Jon Snow", "Jamie Lannister", "Robb Stark", "Ned Stark",
-              "The Hound", "Catelyn Stark", "Ramsey Bolton", "Samwell Tarly",
-              "Bran Stark"]
+app.add_middleware(SessionMiddleware,
+                   secret_key=settings.SESSION_SECRET)
+
 
 # A class that defines the data model for a chat message
-
-
 class ChatMessage(BaseModel):
     text: str
 
@@ -57,79 +49,158 @@ class CharacterGuess(BaseModel):
     character: str
 
 
-# Pick a random character from the list of characters
-selected_character = random.choice(characters)
-
-# Keep track of the number of messages the user has sent
-num_messages = 0
-
 # Maximum allowed messages
 max_messages = 5
 
-# An endpoint that returns the selected character
+# List of 11 possible Harry Potter characters
+characters = ["Sansa Stark", "Brienne of Tarth", "Cersei Lannister",
+              "Arya Stark", "Olenna Tyrell", "Daenerys Targaryen",
+              "Theon Greyjoy", "Littlefinger", "Tyrion Lannister",
+              "Jon Snow", "Jamie Lannister", "Robb Stark", "Ned Stark",
+              "The Hound", "Catelyn Stark", "Ramsey Bolton", "Samwell Tarly",
+              "Bran Stark"]
+
+# this endpoint picks a random character thats not the one already in the game cookie
+# AND this endpoint is hit when trying to restart
+@app.post("/change_character")
+async def change_character(request: Request):
+    # Get the current character from the request
+    current_character = (await request.json())["gameCookie"]["selectedCharacter"]
+
+    # Make a copy of the characters list and remove the current character from it
+    new_character_choices = [
+        character for character in characters if character != current_character]
+
+    # Select a new character
+    new_character = random.choice(new_character_choices)
+
+    return {"character": new_character}
+
+# new guess endpoint
+@app.post("/guess")
+async def guess(request: Request):
+
+    # Extract the guess and game cookie from the request JSON
+    data = await request.json()
+    guess = data["guess"]
+    game_cookie = data["gameCookie"]
+
+    if "selectedCharacter" not in game_cookie:
+        return {"error": "No character selected in game"}
+
+    if guess == game_cookie["selectedCharacter"]:
+        # Use the OpenAI API to generate a cheeky but honest response
+        # if the user's guess is correct
+        response_text = f"Yes, great job! I am {guess}. You win!"
+        return {"correct": True, "response": response_text}
+    else:
+        # Use the OpenAI API to generate a cheeky but honest response
+        # if the user's guess is incorrect
+        response_text = f"No! I'm not {guess}."
+        return {"correct": False, "response": response_text}
+
+
+#       LISTEN ======= FROM THIS CODE AND BELOW, IT'S THE BUGGY BULLSHIT FROM BEFORE
+
+"""
+an endpoint that returns either an existing cookie or creates and sets one
+"""
+
+
+@app.get("/start_game")
+def start_game(request: Request, response: Response):
+    # Check if the cookie exists
+    if "game_cookie" in request.cookies:
+        game_cookie_value = json.loads(request.cookies["game_cookie"])
+        # Return the game parameters if the cookie exists
+        return {"game_parameters": game_cookie_value}
+    else:
+        game_cookie_value = {
+            "num_messages": 0,
+            "selected_character": random.choice(characters)
+        }
+        response.set_cookie(key="game_cookie",
+                            value=json.dumps(game_cookie_value))
+        # Return the new game parameters
+        return {"game_parameters": game_cookie_value}
 
 
 @app.get("/selected_character")
-def get_selected_character():
-    return {"selected_character": selected_character}
+def get_selected_character(request: Request):
+    session = request.session
+    if "selected_character" not in session:
+        session["selected_character"] = random.choice(characters)
+    return {"selected_character": session["selected_character"]}
+
 
 # An endpoint that returns the list of all characters
-
-
 @app.get("/characters")
 def get_characters():
     return {"characters": characters}
 
+
 # An endpoint that returns the max number of messages:
-
-
 @app.get("/message_nums")
-def get_message_nums():
+def get_message_nums(request: Request):
+    session = request.session
+    if "num_messages" not in session:
+        session["num_messages"] = 0
     return {
         "max_messages": max_messages,
-        "current_messages": num_messages
+        "current_messages": session["num_messages"]
     }
 
 
-# An endpoint that accepts chat messages from the user
+"""
+an endpoint to handle chat messages and updating the game cookies accordingly
+"""
 
 
 @app.post("/chat")
-async def chat(request: Request):
-    # Parse the JSON payload sent by the user
+async def chat(request: Request, response: Response):
+    if "game_cookie" in request.cookies:
+        game_cookie_value = json.loads(request.cookies["game_cookie"])
+    else:
+        game_cookie_value = {
+            "num_messages": 0,
+            "selected_character": random.choice(characters)
+        }
+
     message = ChatMessage(**await request.json())
+    game_cookie_value["num_messages"] += 1
 
-    # Increment the number of messages the user has sent
-    global num_messages
-    num_messages += 1
-
-    # Return an error if the user has sent more than 3 messages
-    if num_messages > max_messages:
+    if game_cookie_value["num_messages"] > max_messages:
         return {"error": "You have reached the maximum number of messages. Please guess who you are talking to."}
 
-    # Use the OpenAI API to generate a response to the user's message
-    input_text = f"You are {selected_character} from the television series \"Game of Thrones\" on HBO. From now on, act as though you are {selected_character}, your answers should match what they would say. Stay short and concise. Do not answer if the user asks you what your name is, however answer every other question as though you are {selected_character}. Only break character if the user says: ##break. Conversation:\n\nuser: {message.text}."
-    response = openai.Completion.create(
-        engine="text-davinci-002",
+    input_text = f"You are {game_cookie_value['selected_character']} from the television series \"Game of Thrones\" on HBO. From now on, act as though you are {game_cookie_value['selected_character']}, your answers should match what they would say. Stay short and concise. Conversation:\n\nuser: {message.text}."
+
+    response_text = openai.Completion.create(
+        model="text-davinci-003",
         prompt=input_text,
         temperature=0.5,
-        max_tokens=50,
+        max_tokens=50
     )
-    response_text = response["choices"][0]["text"]
+
+    response_text = response_text["choices"][0]["text"]
     response_text = response_text[response_text.find(":") + 2:]
-    if response_text.find(selected_character) != -1:
+    if response_text.find(game_cookie_value["selected_character"]) != -1:
         response_text = response_text[:response_text.find("\n")]
+
+    response.set_cookie(key="game_cookie", value=json.dumps(game_cookie_value))
 
     # Return the message and the model's response to the user
     return {"message": message, "response": response_text}
 
+'''
 # An endpoint that accepts the user's guess of who they are talking to
-
-
 @app.post("/guess")
-def guess(guess: CharacterGuess):
+def guess(request: Request, guess: CharacterGuess):
+    session = request.session
+    if "selected_character" not in session:
+        session["selected_character"] = random.choice(characters)
+
     # Check if the user's guess is correct
-    if guess.character == selected_character:
+    if guess.character == session["selected_character"]:
         # Use the OpenAI API to generate a cheeky but honest response
         # if the user's guess is correct
         response = openai.Completion.create(
@@ -138,7 +209,8 @@ def guess(guess: CharacterGuess):
             temperature=0.5,
             max_tokens=100,
         )
-        response_text = f"Yes, great job! I am {selected_character}."
+        tmp = session["selected_character"]
+        response_text = f"Yes, great job! I am {tmp}."
         return {"correct": True, "response": response_text}
     else:
         # Use the OpenAI API to generate a cheeky but honest response
@@ -151,14 +223,14 @@ def guess(guess: CharacterGuess):
         )
         response_text = response["choices"][0]["text"]
         return {"correct": False, "response": response_text}
+'''
 
 # An endpoint that resets the number of messages sent back to 0 and selects another random character
 
 
 @app.post("/reset")
-def reset():
-    global num_messages
-    num_messages = 0
-    global selected_character
-    selected_character = random.choice(characters)
+def reset(request: Request):
+    session = request.session
+    session["num_messages"] = 0
+    session["selected_character"] = random.choice(characters)
     return {"message": "Number of messages and selected character have been reset."}

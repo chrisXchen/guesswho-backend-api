@@ -7,6 +7,8 @@ name = "pypi"
 fastapi = "*"
 uvicorn = "*"
 openai = "*"
+starlette = "*"
+itsdangerous = "*"
 
 [dev-packages]
 
