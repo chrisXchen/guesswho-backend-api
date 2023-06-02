@@ -1,32 +1,30 @@
 import random
 import openai
+import json
 from typing import List
 
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, Request, HTTPException, Response
 from pydantic import BaseModel, BaseSettings
 
 from fastapi.middleware.cors import CORSMiddleware
+from starlette.middleware.sessions import SessionMiddleware
 
 
 class Settings(BaseSettings):
     app_name: str = "Guesswho API"
     OPENAI_API_KEY: str
+    SESSION_SECRET: str
 
 
 settings = Settings()
 
-origins = [
-    "http://localhost.tiangolo.com",
-    "https://localhost.tiangolo.com",
-    "http://localhost",
-    "http://localhost:8080",
-]
+app = FastAPI()
+
 
 # Use the OpenAI API to send prompts to a GPT-3 model
 # and receive responses
 openai.api_key = settings.OPENAI_API_KEY
 
-app = FastAPI()
 
 app.add_middleware(
     CORSMiddleware,
@@ -36,17 +34,11 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# List of 11 possible Harry Potter characters
-characters = ["Sansa Stark", "Brienne of Tarth", "Cersei Lannister",
-              "Arya Stark", "Olenna Tyrell", "Daenerys Targaryen",
-              "Theon Greyjoy", "Littlefinger", "Tyrion Lannister",
-              "Jon Snow", "Jamie Lannister", "Robb Stark", "Ned Stark",
-              "The Hound", "Catelyn Stark", "Ramsey Bolton", "Samwell Tarly",
-              "Bran Stark"]
+app.add_middleware(SessionMiddleware,
+                   secret_key=settings.SESSION_SECRET)
+
 
 # A class that defines the data model for a chat message
-
-
 class ChatMessage(BaseModel):
     text: str
 
@@ -57,21 +49,16 @@ class CharacterGuess(BaseModel):
     character: str
 
 
-# Pick a random character from the list of characters
-selected_character = random.choice(characters)
-
-# Keep track of the number of messages the user has sent
-num_messages = 0
-
 # Maximum allowed messages
 max_messages = 5
 
-# An endpoint that returns the selected character
-
-
-@app.get("/selected_character")
-def get_selected_character():
-    return {"selected_character": selected_character}
+# List of 11 possible Harry Potter characters
+characters = ["Sansa Stark", "Brienne of Tarth", "Cersei Lannister",
+              "Arya Stark", "Olenna Tyrell", "Daenerys Targaryen",
+              "Theon Greyjoy", "Littlefinger", "Tyrion Lannister",
+              "Jon Snow", "Jamie Lannister", "Robb Stark", "Ned Stark",
+              "The Hound", "Catelyn Stark", "Ramsey Bolton", "Samwell Tarly",
+              "Bran Stark"]
 
 # An endpoint that returns the list of all characters
 
@@ -80,85 +67,96 @@ def get_selected_character():
 def get_characters():
     return {"characters": characters}
 
-# An endpoint that returns the max number of messages:
+
+# this endpoint picks a random character thats not the one already in the game cookie
+# AND this endpoint is hit when trying to restart
 
 
-@app.get("/message_nums")
-def get_message_nums():
-    return {
-        "max_messages": max_messages,
-        "current_messages": num_messages
-    }
+@app.post("/change_character")
+async def change_character(request: Request):
+    # Get the current character from the request
+    current_character = (await request.json())["gameCookie"]["selectedCharacter"]
 
+    # Make a copy of the characters list and remove the current character from it
+    new_character_choices = [
+        character for character in characters if character != current_character]
 
-# An endpoint that accepts chat messages from the user
+    # Select a new character
+    new_character = random.choice(new_character_choices)
 
+    return {"character": new_character}
 
-@app.post("/chat")
-async def chat(request: Request):
-    # Parse the JSON payload sent by the user
-    message = ChatMessage(**await request.json())
-
-    # Increment the number of messages the user has sent
-    global num_messages
-    num_messages += 1
-
-    # Return an error if the user has sent more than 3 messages
-    if num_messages > max_messages:
-        return {"error": "You have reached the maximum number of messages. Please guess who you are talking to."}
-
-    # Use the OpenAI API to generate a response to the user's message
-    input_text = f"You are {selected_character} from the television series \"Game of Thrones\" on HBO. From now on, act as though you are {selected_character}, your answers should match what they would say. Stay short and concise. Do not answer if the user asks you what your name is, however answer every other question as though you are {selected_character}. Only break character if the user says: ##break. Conversation:\n\nuser: {message.text}."
-    response = openai.Completion.create(
-        engine="text-davinci-002",
-        prompt=input_text,
-        temperature=0.5,
-        max_tokens=50,
-    )
-    response_text = response["choices"][0]["text"]
-    response_text = response_text[response_text.find(":") + 2:]
-    if response_text.find(selected_character) != -1:
-        response_text = response_text[:response_text.find("\n")]
-
-    # Return the message and the model's response to the user
-    return {"message": message, "response": response_text}
-
-# An endpoint that accepts the user's guess of who they are talking to
+# new guess endpoint
 
 
 @app.post("/guess")
-def guess(guess: CharacterGuess):
-    # Check if the user's guess is correct
-    if guess.character == selected_character:
+async def guess(request: Request):
+
+    # Extract the guess and game cookie from the request JSON
+    data = await request.json()
+    guess = data["guess"]
+    game_cookie = data["gameCookie"]
+
+    if "selectedCharacter" not in game_cookie:
+        return {"error": "No character selected in game"}
+
+    if guess == game_cookie["selectedCharacter"]:
         # Use the OpenAI API to generate a cheeky but honest response
         # if the user's guess is correct
-        response = openai.Completion.create(
-            engine="text-davinci-002",
-            prompt=f"user:##break. Are you impersonating {guess.character}?",
-            temperature=0.5,
-            max_tokens=100,
-        )
-        response_text = f"Yes, great job! I am {selected_character}."
+        response_text = f"Yes, great job! I am {guess}. You win!"
         return {"correct": True, "response": response_text}
     else:
         # Use the OpenAI API to generate a cheeky but honest response
         # if the user's guess is incorrect
-        response = openai.Completion.create(
-            engine="text-davinci-002",
-            prompt=f"user: Are you {guess.character}?",
-            temperature=0.5,
-            max_tokens=100,
-        )
-        response_text = response["choices"][0]["text"]
+        response_text = f"No! I'm not {guess}."
         return {"correct": False, "response": response_text}
 
-# An endpoint that resets the number of messages sent back to 0 and selects another random character
+# new chat endpoint
+# working beautifully
 
 
-@app.post("/reset")
-def reset():
-    global num_messages
-    num_messages = 0
-    global selected_character
-    selected_character = random.choice(characters)
-    return {"message": "Number of messages and selected character have been reset."}
+@app.post("/chat")
+async def chat(request: Request):
+
+    # Extract the message input and game cookie from the request JSON
+    data = await request.json()
+    message = data["text"]
+    game_cookie = data["gameCookie"]
+
+    # Handling the 6th or more chat attempt
+    if game_cookie["numMessages"] >= max_messages:
+        return {
+            "message": message,
+            "response": "You have reached the maximum number of messages. Please guess who you are talking to.",
+            "game_cookie": {
+                "num_messages": game_cookie["numMessages"],
+                "selected_character": game_cookie["selectedCharacter"]
+            },
+            "error": "User has sent more than the max number of messages allowed. This won't change until the user resets the game."
+        }
+
+    game_cookie["numMessages"] += 1
+
+    prompt_text = f"You are {game_cookie['selectedCharacter']} from the television series \"Game of Thrones\" on HBO. From now on, act as though you are {game_cookie['selectedCharacter']}, and your responses should be as similar to what the real {game_cookie['selectedCharacter']} would say as possible. Stay short and concise. Conversation:\n\nuser: {message}."
+
+    response_text = openai.Completion.create(
+        model="text-davinci-003",
+        prompt=prompt_text,
+        temperature=0.5,
+        max_tokens=70
+    )
+    response_text = response_text["choices"][0]["text"]
+    response_text = response_text[response_text.find(":") + 2:]
+    if response_text.find(game_cookie["selectedCharacter"]) != -1:
+        response_text = response_text[:response_text.find("\n")]
+
+    return {
+        "message": message,
+        "response": response_text,
+        "game_cookie": {
+            "num_messages": game_cookie["numMessages"],
+            "selected_character": game_cookie["selectedCharacter"]
+        }
+    }
+
+#       LISTEN ======= FROM THIS CODE AND BELOW, IT'S THE BUGGY BULLSHIT FROM BEFORE
