@@ -60,8 +60,18 @@ characters = ["Sansa Stark", "Brienne of Tarth", "Cersei Lannister",
               "The Hound", "Catelyn Stark", "Ramsey Bolton", "Samwell Tarly",
               "Bran Stark"]
 
+# An endpoint that returns the list of all characters
+
+
+@app.get("/characters")
+def get_characters():
+    return {"characters": characters}
+
+
 # this endpoint picks a random character thats not the one already in the game cookie
 # AND this endpoint is hit when trying to restart
+
+
 @app.post("/change_character")
 async def change_character(request: Request):
     # Get the current character from the request
@@ -77,6 +87,8 @@ async def change_character(request: Request):
     return {"character": new_character}
 
 # new guess endpoint
+
+
 @app.post("/guess")
 async def guess(request: Request):
 
@@ -99,138 +111,52 @@ async def guess(request: Request):
         response_text = f"No! I'm not {guess}."
         return {"correct": False, "response": response_text}
 
-
-#       LISTEN ======= FROM THIS CODE AND BELOW, IT'S THE BUGGY BULLSHIT FROM BEFORE
-
-"""
-an endpoint that returns either an existing cookie or creates and sets one
-"""
-
-
-@app.get("/start_game")
-def start_game(request: Request, response: Response):
-    # Check if the cookie exists
-    if "game_cookie" in request.cookies:
-        game_cookie_value = json.loads(request.cookies["game_cookie"])
-        # Return the game parameters if the cookie exists
-        return {"game_parameters": game_cookie_value}
-    else:
-        game_cookie_value = {
-            "num_messages": 0,
-            "selected_character": random.choice(characters)
-        }
-        response.set_cookie(key="game_cookie",
-                            value=json.dumps(game_cookie_value))
-        # Return the new game parameters
-        return {"game_parameters": game_cookie_value}
-
-
-@app.get("/selected_character")
-def get_selected_character(request: Request):
-    session = request.session
-    if "selected_character" not in session:
-        session["selected_character"] = random.choice(characters)
-    return {"selected_character": session["selected_character"]}
-
-
-# An endpoint that returns the list of all characters
-@app.get("/characters")
-def get_characters():
-    return {"characters": characters}
-
-
-# An endpoint that returns the max number of messages:
-@app.get("/message_nums")
-def get_message_nums(request: Request):
-    session = request.session
-    if "num_messages" not in session:
-        session["num_messages"] = 0
-    return {
-        "max_messages": max_messages,
-        "current_messages": session["num_messages"]
-    }
-
-
-"""
-an endpoint to handle chat messages and updating the game cookies accordingly
-"""
+# new chat endpoint
+# working beautifully
 
 
 @app.post("/chat")
-async def chat(request: Request, response: Response):
-    if "game_cookie" in request.cookies:
-        game_cookie_value = json.loads(request.cookies["game_cookie"])
-    else:
-        game_cookie_value = {
-            "num_messages": 0,
-            "selected_character": random.choice(characters)
+async def chat(request: Request):
+
+    # Extract the message input and game cookie from the request JSON
+    data = await request.json()
+    message = data["text"]
+    game_cookie = data["gameCookie"]
+
+    # Handling the 6th or more chat attempt
+    if game_cookie["numMessages"] >= max_messages:
+        return {
+            "message": message,
+            "response": "You have reached the maximum number of messages. Please guess who you are talking to.",
+            "game_cookie": {
+                "num_messages": game_cookie["numMessages"],
+                "selected_character": game_cookie["selectedCharacter"]
+            },
+            "error": "User has sent more than the max number of messages allowed. This won't change until the user resets the game."
         }
 
-    message = ChatMessage(**await request.json())
-    game_cookie_value["num_messages"] += 1
+    game_cookie["numMessages"] += 1
 
-    if game_cookie_value["num_messages"] > max_messages:
-        return {"error": "You have reached the maximum number of messages. Please guess who you are talking to."}
-
-    input_text = f"You are {game_cookie_value['selected_character']} from the television series \"Game of Thrones\" on HBO. From now on, act as though you are {game_cookie_value['selected_character']}, your answers should match what they would say. Stay short and concise. Conversation:\n\nuser: {message.text}."
+    prompt_text = f"You are {game_cookie['selectedCharacter']} from the television series \"Game of Thrones\" on HBO. From now on, act as though you are {game_cookie['selectedCharacter']}, and your responses should be as similar to what the real {game_cookie['selectedCharacter']} would say as possible. Stay short and concise. Conversation:\n\nuser: {message}."
 
     response_text = openai.Completion.create(
         model="text-davinci-003",
-        prompt=input_text,
+        prompt=prompt_text,
         temperature=0.5,
-        max_tokens=50
+        max_tokens=70
     )
-
     response_text = response_text["choices"][0]["text"]
     response_text = response_text[response_text.find(":") + 2:]
-    if response_text.find(game_cookie_value["selected_character"]) != -1:
+    if response_text.find(game_cookie["selectedCharacter"]) != -1:
         response_text = response_text[:response_text.find("\n")]
 
-    response.set_cookie(key="game_cookie", value=json.dumps(game_cookie_value))
+    return {
+        "message": message,
+        "response": response_text,
+        "game_cookie": {
+            "num_messages": game_cookie["numMessages"],
+            "selected_character": game_cookie["selectedCharacter"]
+        }
+    }
 
-    # Return the message and the model's response to the user
-    return {"message": message, "response": response_text}
-
-'''
-# An endpoint that accepts the user's guess of who they are talking to
-@app.post("/guess")
-def guess(request: Request, guess: CharacterGuess):
-    session = request.session
-    if "selected_character" not in session:
-        session["selected_character"] = random.choice(characters)
-
-    # Check if the user's guess is correct
-    if guess.character == session["selected_character"]:
-        # Use the OpenAI API to generate a cheeky but honest response
-        # if the user's guess is correct
-        response = openai.Completion.create(
-            engine="text-davinci-002",
-            prompt=f"user:##break. Are you impersonating {guess.character}?",
-            temperature=0.5,
-            max_tokens=100,
-        )
-        tmp = session["selected_character"]
-        response_text = f"Yes, great job! I am {tmp}."
-        return {"correct": True, "response": response_text}
-    else:
-        # Use the OpenAI API to generate a cheeky but honest response
-        # if the user's guess is incorrect
-        response = openai.Completion.create(
-            engine="text-davinci-002",
-            prompt=f"user: Are you {guess.character}?",
-            temperature=0.5,
-            max_tokens=100,
-        )
-        response_text = response["choices"][0]["text"]
-        return {"correct": False, "response": response_text}
-'''
-
-# An endpoint that resets the number of messages sent back to 0 and selects another random character
-
-
-@app.post("/reset")
-def reset(request: Request):
-    session = request.session
-    session["num_messages"] = 0
-    session["selected_character"] = random.choice(characters)
-    return {"message": "Number of messages and selected character have been reset."}
+#       LISTEN ======= FROM THIS CODE AND BELOW, IT'S THE BUGGY BULLSHIT FROM BEFORE
